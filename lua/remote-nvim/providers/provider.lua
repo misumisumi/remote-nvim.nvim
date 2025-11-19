@@ -13,6 +13,7 @@
 ---@field connection_options string? Connection options needed to connect to the remote host
 ---@field remote_neovim_home string? Path on remote host where remote-neovim installs/configures things
 ---@field neovim_install_method neovim_install_method? How was the remote Neovim installed in the workspace
+---@field remote_binary string? Full path to existing nvim binary on remote (detected by _check_remote_neovim_binary_path)
 ---@field config_copy boolean? Flag indicating if the config should be copied or not
 ---@field client_auto_start boolean? Flag indicating if the client should be auto started or not
 ---@field offline_mode boolean? Should we operate in offline mode
@@ -192,26 +193,23 @@ function Provider:_setup_workspace_variables()
 
     -- For "relax" policy, check if Neovim is already available on remote
     if install_policy == "relax" then
-      self:run_command(
-        "command -v nvim >/dev/null 2>&1 && echo 'exists' || echo 'not_exists'",
-        "Checking if Neovim is available on remote"
-      )
-      local check_output = self.executor:job_stdout()
-      local nvim_exists = false
-      for _, line in ipairs(check_output) do
-        if line:match("exists") then
-          nvim_exists = true
-          break
-        end
-      end
+      local remote_binary = self:_check_remote_neovim_binary_path()
 
-      if nvim_exists then
-        -- Skip version selection and installation - use system Neovim
-        self._host_config.neovim_version = "system"
+      if remote_binary then
+        self:run_command(("%s --version"):format(remote_binary), "Checking Neovim version on remote")
+        local nvim_remote_check_output_lines = self.executor:job_stdout()
+        for _, output_str in ipairs(nvim_remote_check_output_lines) do
+          if output_str:find("NVIM v.*") then
+            self._host_config.neovim_version = output_str:match("v.*"):gsub("^v", "")
+            break
+          end
+        end
         self._host_config.neovim_install_method = "system"
+        self._host_config.remote_binary = remote_binary
         self._config_provider:update_workspace_config(self.unique_host_id, {
           neovim_install_method = self._host_config.neovim_install_method,
           neovim_version = self._host_config.neovim_version,
+          remote_binary = remote_binary,
         })
         self._remote_neovim_version = self._host_config.neovim_version
         self._remote_neovim_install_method = self._host_config.neovim_install_method
@@ -476,10 +474,6 @@ function Provider:_get_remote_neovim_version_preference(prompt_title)
     local possible_choices = {}
     local version_map = {}
 
-    -- Check if system-wide Neovim is available, if yes, add it as an option
-    self:run_command("nvim --version || true", "Checking if Neovim is installed system-wide on remote")
-    local nvim_remote_check_output_lines = self.executor:job_stdout()
-
     if self.offline_mode and remote_nvim.config.offline_mode.no_github then
       assert(self._remote_os ~= nil, "OS should not be nil")
       assert(self._remote_neovim_install_method, "Install method should not be nil")
@@ -510,17 +504,6 @@ function Provider:_get_remote_neovim_version_preference(prompt_title)
         or provider_utils.is_greater_neovim_version(ver, require("remote-nvim.constants").MIN_NEOVIM_VERSION)
     end, possible_choices)
     table.sort(possible_choices, provider_utils.is_greater_neovim_version)
-
-    -- We add this now, because we do not want to mess with the sorting
-    -- TODO: Sorting should only sort, we should add stable and nightly manually.
-    local system_neovim_version
-    for _, output_str in ipairs(nvim_remote_check_output_lines) do
-      if output_str:find("NVIM v.*") then
-        table.insert(possible_choices, "system")
-        system_neovim_version = output_str
-        break
-      end
-    end
 
     self._remote_neovim_version = self:get_selection(possible_choices, {
       prompt = prompt_title,
@@ -661,7 +644,12 @@ end
 ---Returns system nvim if install method is "system", otherwise returns path to installed binary
 ---@return string binary_path remote neovim binary path
 function Provider:_remote_neovim_binary_path()
-  -- If using system Neovim (e.g., when install_policy is "relax" or "global" and nvim exists)
+  -- If remote_binary is set in host_config, use it
+  if self._host_config.remote_binary then
+    return self._host_config.remote_binary
+  end
+
+  -- If using system Neovim (e.g., when install_policy is "relax" and nvim exists)
   if self._remote_neovim_install_method == "system" then
     return "nvim" -- Use system nvim on PATH
   end
@@ -680,6 +668,61 @@ function Provider:_remote_neovim_binary_dir()
     "nvim-downloads",
     self._remote_neovim_version
   )
+end
+
+---@private
+---Check for existing nvim binary on remote for "relax" install policy
+---@return string? binary_path Full path to existing nvim binary, or nil if not found
+function Provider:_check_remote_neovim_binary_path()
+  local install_policy = remote_nvim.config.remote.install_nvim_policy
+
+  -- Only search for existing binary when install_policy is "relax"
+  if install_policy ~= "relax" then
+    return nil
+  end
+
+  -- 1. Check if nvim is available in PATH using command -v / where
+  local exists_cmd
+  if self._remote_is_windows then
+    exists_cmd = "where nvim || true"
+  else
+    exists_cmd = "command -v nvim || true"
+  end
+
+  self:run_command(exists_cmd, "Checking if nvim exists in PATH")
+  local exists_output = self.executor:job_stdout()
+
+  for _, line in ipairs(exists_output) do
+    if line:find("nvim") then
+      return line
+    end
+  end
+
+  -- 2. Search in configured search_binary_pathes
+  local search_paths = remote_nvim.config.remote.search_binary_pathes
+  if search_paths and #search_paths > 0 then
+    for _, search_path in ipairs(search_paths) do
+      local find_cmd
+      if self._remote_is_windows then
+        -- Windows: use dir command to search for nvim.exe
+        find_cmd = string.format('dir /s /b "%s\\nvim.exe" 2>NUL', search_path)
+      else
+        -- Unix: use find command
+        find_cmd = string.format('find "%s" -type f -executable -name nvim 2>/dev/null | head -1', search_path)
+      end
+
+      self:run_command(find_cmd, "Searching for nvim in " .. search_path)
+      local find_output = self.executor:job_stdout()
+
+      for _, line in ipairs(find_output) do
+        if line and line ~= "" then
+          return line
+        end
+      end
+    end
+  end
+
+  return nil
 end
 
 ---@private
