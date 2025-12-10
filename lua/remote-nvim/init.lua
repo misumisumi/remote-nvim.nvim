@@ -74,6 +74,7 @@ local utils = require("remote-nvim.utils")
 
 ---@alias install_nvim_policy "prompt"|"relax"|"always"
 ---@alias upload_config_policy "never"|"prompt"|"relax"|"always"
+---@alias launch_cmd_prefix string launch command prefix for starting neovim on remote
 
 ---@class remote-nvim.config.PluginConfig.Remote
 ---@field copy_dirs remote-nvim.config.PluginConfig.Remote.CopyDirs Which directories should be copied over to the remote
@@ -153,6 +154,7 @@ M.default_opts = {
     app_name = "nvim",
     install_nvim_policy = "always",
     upload_config_policy = "always",
+    launch_cmd_prefix = nil,
     search_binary_pathes = {},
     copy_dirs = {
       config = {

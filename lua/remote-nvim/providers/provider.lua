@@ -951,6 +951,11 @@ function Provider:_launch_remote_neovim_server()
       remote_server_launch_cmd = ("%s --cmd ':cd %s'"):format(remote_server_launch_cmd, self._remote_working_dir)
     end
 
+    local launch_cmd_prefix = remote_nvim.config.remote.launch_cmd_prefix
+    if launch_cmd_prefix ~= nil then
+      remote_server_launch_cmd = ("%s %s"):format(launch_cmd_prefix, remote_server_launch_cmd)
+    end
+
     self:_run_code_in_coroutine(function()
       self:run_command(
         remote_server_launch_cmd,
