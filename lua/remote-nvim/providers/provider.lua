@@ -708,14 +708,14 @@ function Provider:_check_remote_neovim_binary_path()
         find_cmd = string.format('dir /s /b "%s\\nvim.exe" 2>NUL', search_path)
       else
         -- Unix: use find command
-        find_cmd = string.format('find "%s" -type f -executable -name nvim 2>/dev/null | head -1', search_path)
+        find_cmd = string.format('find "%s" -type f -executable -name nvim 2>/dev/null', search_path)
       end
 
       self:run_command(find_cmd, "Searching for nvim in " .. search_path)
       local find_output = self.executor:job_stdout()
 
       for _, line in ipairs(find_output) do
-        if line and line ~= "" then
+        if line:find("nvim") then
           return line
         end
       end
